@@ -9,3 +9,4 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+st.markdown("<h1>✨Abra Cadabra✨</h1>", unsafe_allow_html=True)
