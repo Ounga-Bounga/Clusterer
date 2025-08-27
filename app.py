@@ -446,3 +446,11 @@ Keyword,Monthly vol.,KW list and %
 néons,5400,deco neon (1600): 20% | neon deco (1600): 20% | néon déco (1600): 20%
 tube à led,4400,neons led (1600): 40% | neon led (1600): 30% | led neon (1600): 10%
 deco neon,1600,neon deco (1600): 70% | decoration neon (140): 70% | néon déco: 50%
+**Exemple File 2 (ranking)
+keyword,rank,url
+neon light,4,https://yellowpop.fr/pages/creer-neon-personnalise
+custom neon,4,https://yellowpop.fr/pages/creer-neon-personnalise
+neon design,9,https://yellowpop.fr/pages/creer-neon-personnalise
+néons,9,https://yellowpop.fr/pages/creer-neon-personnalise
+led neon,9,https://yellowpop.fr/pages/creer-neon-personnalise
+""")
