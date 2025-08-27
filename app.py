@@ -1,18 +1,39 @@
 import re
 import io
+import unicodedata
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="SEO Clustering App", page_icon="🔗", layout="wide")
 st.title("🔗 SEO Clustering (SERP Similarity)")
-st.write("Dépose un CSV **ou** un XLSX → l’app crée des clusters selon un seuil de similarité (en %).")
+
+st.write(
+    "Dépose un CSV **ou** un XLSX. L’app : "
+    "1) calcule les métriques globales, "
+    "2) retire les accents et **dé-duplique** (on garde le plus gros volume), "
+    "3) clusterise selon le seuil de similarité (en %)."
+)
 
 # ---------- Helpers ----------
+def strip_accents(text: str) -> str:
+    """Supprime les accents (sans toucher aux autres caractères)."""
+    if not isinstance(text, str):
+        text = str(text)
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return text
+
+def normalize_kw(text: str) -> str:
+    """Normalise pour comparer: accents retirés, lower, espaces compactés/trim."""
+    base = strip_accents(text).lower().strip()
+    base = re.sub(r"\s+", " ", base)
+    return base
+
 @st.cache_data(show_spinner=False)
 def parse_similarity_cell(cell: str):
     """
     Transforme une cellule 'KW list and %' en liste [(keyword, percent_float), ...]
-    Gère par ex.:
+    Gère p.ex.:
       'kw (1600): 40%'  'kw: 40 %'  'kw 40%'  séparés par '|'
     """
     if pd.isna(cell) or not str(cell).strip():
@@ -20,9 +41,8 @@ def parse_similarity_cell(cell: str):
     parts = [p.strip() for p in str(cell).split("|")]
     results = []
     for p in parts:
-        # Normaliser espaces autour de %
-        p = re.sub(r"\s*%\s*$", "%", p.strip())
-        # 1) Forme "kw (123): 40%"
+        p = re.sub(r"\s*%\s*$", "%", p.strip())  # normaliser espaces avant %
+        # Forme "kw (123): 40%"
         m = re.match(r"(.+?)(?:\(\s*\d+\s*\))?\s*:\s*([\d.,]+)\s*%", p)
         if m:
             kw = m.group(1).strip()
@@ -32,7 +52,7 @@ def parse_similarity_cell(cell: str):
             except:
                 pass
             continue
-        # 2) Forme fallback "kw 40%"
+        # Forme fallback "kw 40%"
         m2 = re.match(r"(.+?)\s+([\d.,]+)\s*%", p)
         if m2:
             kw = m2.group(1).strip()
@@ -71,14 +91,20 @@ class UnionFind:
             self.parent[ry] = rx
             self.rank[rx] += 1
 
+def _read_any(file):
+    if file.name.lower().endswith(".xlsx"):
+        return pd.read_excel(file)
+    return pd.read_csv(file)
+
 @st.cache_data(show_spinner=True)
-def cluster_keywords(df: pd.DataFrame, threshold: float):
+def prepare_base(df: pd.DataFrame):
     """
-    Crée les clusters avec Union-Find.
-    On relie A à B si la similarité A→B >= threshold (un seul sens suffit).
-    Main keyword = celui avec le volume max du cluster.
+    - Normalise colonnes
+    - Calcule métriques globales (count / volume total)
+    - Retire accents + dé-duplique (garde la ligne au volume max par forme normalisée)
+    - Construit un alias_map: norm -> mot-clé canonique conservé
+    - Renvoie aussi le nombre de mots-clés retirés par déduplication
     """
-    # Standardiser colonnes (ton export est déjà OK)
     cols = {c.lower(): c for c in df.columns}
     kw_col = cols.get("keyword") or list(df.columns)[0]
     vol_col = cols.get("monthly vol.") or cols.get("volume") or list(df.columns)[1]
@@ -88,110 +114,160 @@ def cluster_keywords(df: pd.DataFrame, threshold: float):
     data[kw_col] = data[kw_col].astype(str).str.strip()
     data[vol_col] = pd.to_numeric(data[vol_col], errors="coerce").fillna(0).astype(float)
 
-    all_kws = data[kw_col].tolist()
+    # métriques globales "raw" (avant dédup)
+    file_kw_count_raw = int(data[kw_col].nunique())
+    file_total_volume = int(data[vol_col].sum())
+
+    # clé de dédup (accents out + lower + espaces compactés)
+    data["__norm"] = data[kw_col].map(normalize_kw)
+
+    # garder index de la ligne au volume max dans chaque groupe normalisé
+    idx_keep = data.groupby("__norm")[vol_col].idxmax()
+    deduped = data.loc[idx_keep].copy()
+
+    # alias map: norm -> keyword canonique (texte de la ligne conservée)
+    norm_to_canonical = dict(zip(deduped["__norm"], deduped[kw_col]))
+
+    # compter les doublons supprimés
+    file_kw_count_dedup = int(deduped["__norm"].nunique())
+    removed_dups = file_kw_count_raw - file_kw_count_dedup
+
+    # on peut drop la colonne technique
+    deduped = deduped.drop(columns=["__norm"])
+
+    return (
+        deduped,
+        kw_col,
+        vol_col,
+        sim_col,
+        file_kw_count_raw,
+        file_total_volume,
+        removed_dups,
+        norm_to_canonical,
+    )
+
+@st.cache_data(show_spinner=True)
+def clusterize(data: pd.DataFrame, kw_col: str, vol_col: str, sim_col: str,
+               threshold: float, norm_to_canonical: dict):
+    """
+    Résultat AU FORMAT DEMANDÉ :
+    - main_keyword
+    - main_volume
+    - keywords_count
+    - cluster_volume
+    - secondary_keywords (sans le main, séparés par " | ")
+    """
+    # volumes/corpus après déduplication
     volumes = dict(zip(data[kw_col], data[vol_col]))
+    all_kws = list(data[kw_col])
 
     uf = UnionFind()
     for kw in all_kws:
         uf.add(kw)
 
+    # Créer un resolver d'alias: texte -> canonique
+    def resolve_canonical(name: str) -> str | None:
+        norm = normalize_kw(name)
+        canon = norm_to_canonical.get(norm)
+        return canon if canon in volumes else None
+
+    # Construire les arêtes (un sens suffit)
     for _, row in data.iterrows():
         a = row[kw_col]
         sims = parse_similarity_cell(row.get(sim_col, ""))
-        for b, pct in sims:
-            b = str(b).strip()
-            if b in volumes and pct >= threshold:
-                uf.add(b)
-                uf.union(a, b)
+        for b_raw, pct in sims:
+            if pct < threshold:
+                continue
+            b = resolve_canonical(b_raw)
+            if b is None:
+                continue
+            uf.add(b)
+            uf.union(a, b)
 
+    # Groupes
     groups = {}
     for kw in all_kws:
         root = uf.find(kw)
         groups.setdefault(root, []).append(kw)
 
-    cluster_rows = []
-    for i, (root, members) in enumerate(groups.items(), start=1):
+    # Résumé au format demandé
+    out_rows = []
+    for _, members in groups.items():
         members_sorted = sorted(members, key=lambda k: volumes.get(k, 0), reverse=True)
         main_kw = members_sorted[0]
-        total_vol = sum(volumes.get(k, 0) for k in members_sorted)
-        cluster_rows.append({
-            "cluster_id": i,
+        main_vol = int(volumes.get(main_kw, 0))
+        cluster_vol = int(sum(volumes.get(k, 0) for k in members_sorted))
+        secondary = [k for k in members_sorted if k != main_kw]
+        out_rows.append({
             "main_keyword": main_kw,
-            "size": len(members_sorted),
-            "total_volume": int(total_vol),
-            "keywords": ", ".join(members_sorted),
+            "main_volume": main_vol,
+            "keywords_count": len(members_sorted),
+            "cluster_volume": cluster_vol,
+            "secondary_keywords": " | ".join(secondary),
         })
 
-    clusters_df = pd.DataFrame(cluster_rows).sort_values(
-        ["size", "total_volume"], ascending=[False, False]
+    result = pd.DataFrame(out_rows).sort_values(
+        ["keywords_count", "cluster_volume"], ascending=[False, False]
     ).reset_index(drop=True)
 
-    exploded = []
-    for _, r in clusters_df.iterrows():
-        cid = r["cluster_id"]
-        for k in [x.strip() for x in r["keywords"].split(",") if x.strip()]:
-            exploded.append({
-                "cluster_id": cid,
-                "main_keyword": r["main_keyword"],
-                "keyword": k,
-                "volume": int(volumes.get(k, 0)),
-            })
-    exploded_df = pd.DataFrame(exploded).sort_values(
-        ["cluster_id", "volume"], ascending=[True, False]
-    )
-
-    return clusters_df, exploded_df
-
-def to_excel_bytes(sheets: dict):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for name, d in sheets.items():
-            d.to_excel(writer, index=False, sheet_name=name)
-    return output.getvalue()
+    return result
 
 # ---------- UI ----------
 left, right = st.columns([1, 2])
 
 with left:
     st.subheader("1) Dépose ton fichier")
-    file = st.file_uploader("CSV ou XLSX avec: Keyword | Monthly vol. | KW list and %", type=["csv", "xlsx"])
+    file = st.file_uploader(
+        "CSV ou XLSX avec: Keyword | Monthly vol. | KW list and %",
+        type=["csv", "xlsx"]
+    )
     threshold = st.slider("Seuil de similarité (%)", min_value=0, max_value=100, value=30, step=5)
     st.caption("Astuce: 30–40% marche bien pour des SERP FR.")
 
-def _read_any(file):
-    if file.name.lower().endswith(".xlsx"):
-        # lit le premier sheet
-        return pd.read_excel(file)
-    else:
-        return pd.read_csv(file)
-
 if file:
     df = _read_any(file)
-    with st.expander("Aperçu des 10 premières lignes"):
-        st.dataframe(df.head(10), use_container_width=True)
+    (
+        data, kw_col, vol_col, sim_col,
+        file_kw_count_raw, file_total_volume,
+        removed_dups, norm_to_canonical
+    ) = prepare_base(df)
 
-    clusters_df, exploded_df = cluster_keywords(df, float(threshold))
+    with st.expander("Aperçu (10 premières lignes après dédup)"):
+        st.dataframe(data.head(10), use_container_width=True)
+
+    # Métriques globales
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Mots-clés (fichier RAW)", value=f"{file_kw_count_raw}")
+    with m2:
+        st.metric("Volume total (fichier RAW)", value=f"{file_total_volume:,}".replace(",", " "))
+    with m3:
+        st.metric("Doublons supprimés (sans accents)", value=f"{removed_dups}")
+
+    # Clusterisation dynamique (sur le corpus dédupliqué)
+    result_df = clusterize(
+        data, kw_col, vol_col, sim_col, float(threshold), norm_to_canonical
+    )
 
     with right:
         st.subheader("2) Résultats des clusters")
-        st.write("**Résumé par cluster**")
-        st.dataframe(clusters_df, use_container_width=True, height=360)
+        st.dataframe(result_df, use_container_width=True, height=560)
 
-        st.write("**Vue détaillée (1 ligne = 1 mot-clé)**")
-        st.dataframe(exploded_df, use_container_width=True, height=420)
-
-        xlsx_bytes = to_excel_bytes({"Clusters": clusters_df, "Keywords": exploded_df})
+        # Exports
+        # Excel
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            result_df.to_excel(writer, index=False, sheet_name="Clusters")
         st.download_button(
-            label="⬇️ Télécharger résultats (Excel .xlsx)",
-            data=xlsx_bytes,
-            file_name="seo_clusters.xlsx",
+            label="⬇️ Télécharger (Excel .xlsx)",
+            data=output.getvalue(),
+            file_name="seo_clusters_summary.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
-        csv_bytes = clusters_df.to_csv(index=False).encode("utf-8")
+        # CSV
         st.download_button(
-            label="⬇️ Télécharger clusters (CSV)",
-            data=csv_bytes,
+            label="⬇️ Télécharger (CSV)",
+            data=result_df.to_csv(index=False).encode("utf-8"),
             file_name="seo_clusters_summary.csv",
             mime="text/csv",
         )
