@@ -429,3 +429,19 @@ if file:
         )
 else:
     st.info("Dépose d’abord le fichier mots-clés pour générer les clusters, puis ajoute ton fichier de rankings.")
+with st.expander("📌 Rappel du format attendu"):
+    st.markdown("""
+### ✅ Résumé des formats
+
+**File 1 (clusters)**  
+Colonnes requises :  
+- `Keyword`  
+- `Monthly vol.`  
+- `KW list and %`  
+
+Exemple :  
+```csv
+Keyword,Monthly vol.,KW list and %
+néons,5400,deco neon (1600): 20% | neon deco (1600): 20% | néon déco (1600): 20%
+tube à led,4400,neons led (1600): 40% | neon led (1600): 30% | led neon (1600): 10%
+deco neon,1600,neon deco (1600): 70% | decoration neon (140): 70% | néon déco: 50%
