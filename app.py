@@ -4,54 +4,40 @@ import unicodedata
 import pandas as pd
 import streamlit as st
 
-# =============== App config ===============
-st.set_page_config(page_title="SEO Clustering → Ranking Decisions", page_icon="🔗", layout="wide")
+st.set_page_config(page_title="SEO Clustering App", page_icon="🔗", layout="wide")
 st.title("🔗 SEO Clustering (SERP Similarity) → 📈 Ranking decisions")
 
 st.write(
-    "1) Dépose ton **fichier mots-clés** (CSV/XLSX) → dédup **sans accents** → métriques → clusters avec **seuil de similarité**.\n"
-    "2) Dépose ton **fichier de rankings** (CSV/XLSX) → décision **Optimize (1–20)** ou **Create new page**."
+    "1) Dépose ton fichier mots-clés → dédup (sans accents) → clusters\n"
+    "2) Dépose ton fichier de **rankings** → l’app décide : **Optimize existing page** (pos 1–20) ou **Create new page** (>20 ou aucune donnée)"
 )
 
-# =========================================
-#                 Utils
-# =========================================
+# ---------- Utils ----------
 def strip_accents(text: str) -> str:
-    """Supprime les accents, ne modifie pas le reste."""
     if not isinstance(text, str):
         text = str(text)
     text = unicodedata.normalize("NFD", text)
     return "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
 
 def normalize_kw(text: str) -> str:
-    """Forme canonique pour comparaison: accents out + lower + espaces compactés/trim."""
     base = strip_accents(text).lower().strip()
     base = re.sub(r"\s+", " ", base)
     return base
 
 def _read_any(file):
-    """Lit CSV/XLSX. Pour XLSX, lit le 1er onglet par défaut (comme la plupart des exports)."""
     if file.name.lower().endswith(".xlsx"):
-        return pd.read_excel(file, sheet_name=0)
+        return pd.read_excel(file)
     return pd.read_csv(file)
 
-# =========================================
-#       Parsing de la colonne similarités
-# =========================================
+# ---------- Similarity parsing ----------
 @st.cache_data(show_spinner=False)
 def parse_similarity_cell(cell: str):
-    """
-    Transforme une cellule 'KW list and %' en liste [(keyword, percent_float), ...]
-    Gère p.ex.:
-      'kw (1600): 40%'  'kw: 40 %'  'kw 40%'  séparés par '|'
-    """
     if pd.isna(cell) or not str(cell).strip():
         return []
     parts = [p.strip() for p in str(cell).split("|")]
     results = []
     for p in parts:
-        p = re.sub(r"\s*%\s*$", "%", p.strip())  # normaliser espaces avant %
-        # Forme "kw (123): 40%"
+        p = re.sub(r"\s*%\s*$", "%", p.strip())
         m = re.match(r"(.+?)(?:\(\s*\d+\s*\))?\s*:\s*([\d.,]+)\s*%", p)
         if m:
             kw = m.group(1).strip()
@@ -61,7 +47,6 @@ def parse_similarity_cell(cell: str):
             except:
                 pass
             continue
-        # Forme fallback "kw 40%"
         m2 = re.match(r"(.+?)\s+([\d.,]+)\s*%", p)
         if m2:
             kw = m2.group(1).strip()
@@ -72,9 +57,7 @@ def parse_similarity_cell(cell: str):
                 pass
     return results
 
-# =========================================
-#                Union-Find
-# =========================================
+# ---------- Union-Find ----------
 class UnionFind:
     def __init__(self):
         self.parent = {}
@@ -103,17 +86,9 @@ class UnionFind:
             self.parent[ry] = rx
             self.rank[rx] += 1
 
-# =========================================
-#     Step 1 : Base (dédup sans accents)
-# =========================================
+# ---------- Step 1: base prep (dedup w/o accents) ----------
 @st.cache_data(show_spinner=True)
 def prepare_base(df: pd.DataFrame):
-    """
-    - Normalise colonnes
-    - Calcule métriques RAW (count/volume)
-    - Dédup: supprime accents + minuscule pour comparer; conserve la ligne au volume max
-    - Retourne aussi: removed_dups et norm_to_canonical (norm -> kw retenu)
-    """
     cols = {c.lower(): c for c in df.columns}
     kw_col = cols.get("keyword") or list(df.columns)[0]
     vol_col = cols.get("monthly vol.") or cols.get("volume") or list(df.columns)[1]
@@ -123,16 +98,13 @@ def prepare_base(df: pd.DataFrame):
     data[kw_col] = data[kw_col].astype(str).str.strip()
     data[vol_col] = pd.to_numeric(data[vol_col], errors="coerce").fillna(0).astype(float)
 
-    # Métriques RAW
     file_kw_count_raw = int(data[kw_col].nunique())
     file_total_volume = int(data[vol_col].sum())
 
-    # Dédup par forme normalisée
     data["__norm"] = data[kw_col].map(normalize_kw)
     idx_keep = data.groupby("__norm")[vol_col].idxmax()
     deduped = data.loc[idx_keep].copy()
     norm_to_canonical = dict(zip(deduped["__norm"], deduped[kw_col]))
-
     removed_dups = file_kw_count_raw - int(deduped["__norm"].nunique())
     deduped = deduped.drop(columns=["__norm"])
 
@@ -142,20 +114,10 @@ def prepare_base(df: pd.DataFrame):
         removed_dups, norm_to_canonical
     )
 
-# =========================================
-#         Step 1b : Clustering
-# =========================================
+# ---------- Step 1b: clustering ----------
 @st.cache_data(show_spinner=True)
 def clusterize(data: pd.DataFrame, kw_col: str, vol_col: str, sim_col: str,
                threshold: float, norm_to_canonical: dict):
-    """
-    Sortie: tableau UNIQUE au format demandé :
-      - main_keyword (nom du cluster)
-      - main_volume
-      - keywords_count (main + secondaires)
-      - cluster_volume (somme volumes du cluster)
-      - secondary_keywords (sans le main, séparés par " | ")
-    """
     volumes = dict(zip(data[kw_col], data[vol_col]))
     all_kws = list(data[kw_col])
     uf = UnionFind()
@@ -167,7 +129,6 @@ def clusterize(data: pd.DataFrame, kw_col: str, vol_col: str, sim_col: str,
         canon = norm_to_canonical.get(norm)
         return canon if canon in volumes else None
 
-    # Arêtes (un sens suffit)
     for _, row in data.iterrows():
         a = row[kw_col]
         sims = parse_similarity_cell(row.get(sim_col, ""))
@@ -180,13 +141,11 @@ def clusterize(data: pd.DataFrame, kw_col: str, vol_col: str, sim_col: str,
             uf.add(b)
             uf.union(a, b)
 
-    # Groupes
     groups = {}
     for kw in all_kws:
         root = uf.find(kw)
         groups.setdefault(root, []).append(kw)
 
-    # Résumé
     out_rows = []
     for _, members in groups.items():
         members_sorted = sorted(members, key=lambda k: volumes.get(k, 0), reverse=True)
@@ -207,39 +166,21 @@ def clusterize(data: pd.DataFrame, kw_col: str, vol_col: str, sim_col: str,
     ).reset_index(drop=True)
     return result
 
-# =========================================
-#          Step 2 : Rankings
-# =========================================
+# ---------- Step 2: ranking matching & decision ----------
 @st.cache_data(show_spinner=True)
 def prepare_ranking(df_rank: pd.DataFrame):
     """
-    Normalise le fichier de rankings.
-    Colonnes attendues (noms souples) :
-      - keyword  (obligatoire)
-      - url      (obligatoire)
-      - position (obligatoire) : accepte 'position', 'rank', 'pos', 'google position', etc.
+    Rend un DF ranking normalisé.
+    Colonnes attendues (noms souples):
+      - keyword (obligatoire)
+      - url (obligatoire)
+      - position (obligatoire, nombre)
+    Si d'autres colonnes existent (moteur, pays, device), on les ignore.
     """
-    cols = {c.lower().strip(): c for c in df_rank.columns}
-
-    # keyword
-    kw_candidates = ["keyword", "kw", "query", "search term"]
-    kwc = next((cols[c] for c in kw_candidates if c in cols), None)
-    if not kwc:
-        kwc = list(df_rank.columns)[0]
-
-    # url
-    url_candidates = ["url", "landing page", "page", "target url"]
-    urlc = next((cols[c] for c in url_candidates if c in cols), None)
-    if not urlc:
-        urlc = list(df_rank.columns)[1] if len(df_rank.columns) > 1 else kwc
-
-    # position
-    pos_candidates = ["position", "rank", "pos", "google position", "google rank"]
-    posc = next((cols[c] for c in pos_candidates if c in cols), None)
-    if not posc:
-        posc = list(df_rank.columns)[2] if len(df_rank.columns) > 2 else None
-        if posc is None:
-            raise ValueError("Impossible de trouver la colonne de position (position/rank/pos).")
+    cols = {c.lower(): c for c in df_rank.columns}
+    kwc = cols.get("keyword") or cols.get("kw") or list(df_rank.columns)[0]
+    urlc = cols.get("url") or list(df_rank.columns)[1]
+    posc = cols.get("position") or cols.get("rank") or list(df_rank.columns)[2]
 
     r = df_rank.copy()
     r[kwc] = r[kwc].astype(str).str.strip()
@@ -249,17 +190,18 @@ def prepare_ranking(df_rank: pd.DataFrame):
     r = r.dropna(subset=[kwc, urlc, posc])
     r["__norm_kw"] = r[kwc].map(normalize_kw)
 
+    # pour chaque keyword normalisé, on garde toutes les lignes mais on pourra extraire la best pos
     return r[[kwc, urlc, posc, "__norm_kw"]].rename(
         columns={kwc: "rank_keyword", urlc: "rank_url", posc: "rank_position"}
     )
 
 @st.cache_data(show_spinner=True)
-def decide_from_ranking(clusters_df: pd.DataFrame, ranking_norm_df: pd.DataFrame, optimize_max_pos: int = 20):
+def decide_from_ranking(clusters_df: pd.DataFrame, ranking_norm_df: pd.DataFrame):
     """
     Mappe chaque main_keyword -> ranking rows (via normalisation sans accents).
     Décision:
-      - best position in [1, optimize_max_pos]  => Optimize existing page
-      - else (>optimize_max_pos or no data)     => Create new page
+      - best position in [1,20]  => Optimize existing page
+      - else (>20 or no data)    => Create new page
     Sortie: clusters_df + colonnes:
       - best_position
       - best_url
@@ -284,11 +226,12 @@ def decide_from_ranking(clusters_df: pd.DataFrame, ranking_norm_df: pd.DataFrame
             matches_sorted = sorted([m for m in matches if pd.notna(m[0])])
             if matches_sorted:
                 best_pos, best_url = matches_sorted[0]
+                # garder jusqu'à 3 evidences
                 evidence_list = [f"{int(p)} — {u}" for p, u in matches_sorted[:3] if pd.notna(p)]
 
-        if best_pos is not None and 1 <= best_pos <= optimize_max_pos:
+        if best_pos is not None and 1 <= best_pos <= 20:
             decision = "Optimize existing page"
-        elif best_pos is not None and best_pos > optimize_max_pos:
+        elif best_pos is not None and best_pos > 20:
             decision = "Create new page"
         else:
             decision = "Create new page (no ranking)"
@@ -303,21 +246,18 @@ def decide_from_ranking(clusters_df: pd.DataFrame, ranking_norm_df: pd.DataFrame
 
     out = pd.DataFrame(rows)
 
-    # compteurs utiles
+    # petits compteurs utiles
     n_opt = int((out["decision"] == "Optimize existing page").sum())
     n_create = int((out["decision"].str.startswith("Create new page")).sum())
 
     return out, n_opt, n_create
 
-# =========================================
-#                   UI
-# =========================================
+# ================= UI =================
 with st.sidebar:
     st.markdown("### ℹ️ Tips")
-    st.markdown("- **Dédup**: accents retirés + minuscule, conserve le **plus gros volume**.")
-    st.markdown("- **Similarité**: un sens suffit (A→B ≥ seuil).")
-    st.markdown("- **Decision ranking**: **1–20 = Optimize**, sinon **Create new page**.")
-    optimize_max_pos = st.number_input("Seuil Optimize (meilleure position ≤)", min_value=1, max_value=100, value=20, step=1)
+    st.markdown("- Dédup = accents retirés + minuscule, conserve le **plus gros volume**.")
+    st.markdown("- Similarité: un sens suffit (A→B ≥ seuil).")
+    st.markdown("- Decision ranking: **1–20 = Optimize**, sinon **Create new page**.")
 
 # --- Section 1: corpus + clusters ---
 left, right = st.columns([1, 2])
@@ -332,7 +272,6 @@ with left:
     st.caption("Astuce: 30–40% marche bien pour des SERP FR.")
 
 if file:
-    # Lecture & préparation
     df = _read_any(file)
     (
         data, kw_col, vol_col, sim_col,
@@ -343,7 +282,6 @@ if file:
     with st.expander("Aperçu (10 premières lignes **après dédup**)"):
         st.dataframe(data.head(10), use_container_width=True)
 
-    # Métriques globales (RAW)
     m1, m2, m3 = st.columns(3)
     with m1:
         st.metric("Mots-clés (fichier RAW)", value=f"{file_kw_count_raw}")
@@ -352,7 +290,7 @@ if file:
     with m3:
         st.metric("Doublons supprimés (sans accents)", value=f"{removed_dups}")
 
-    # Clustering dynamique
+    # Clusters
     clusters_df = clusterize(data, kw_col, vol_col, sim_col, float(threshold), norm_to_canonical)
 
     with right:
@@ -378,7 +316,7 @@ if file:
     st.markdown("---")
     # --- Section 2: Ranking & decisions ---
     st.subheader("2) Dépose ton **fichier de rankings** (Semrush/Ahrefs/Monitorank, etc.)")
-    st.caption("Colonnes attendues (souples) : **Keyword**, **URL**, **Position/Rank**. CSV/XLSX accepté.")
+    st.caption("Colonnes attendues (souples) : **Keyword**, **URL**, **Position**. CSV/XLSX accepté.")
     rank_file = st.file_uploader("Ranking file", type=["csv", "xlsx"], key="rankfile")
 
     if rank_file:
@@ -388,26 +326,13 @@ if file:
         with st.expander("Aperçu ranking (top 15)"):
             st.dataframe(rank_df.head(15), use_container_width=True)
 
-        decisions_df, n_opt, n_create = decide_from_ranking(clusters_df, rank_df, optimize_max_pos=optimize_max_pos)
+        decisions_df, n_opt, n_create = decide_from_ranking(clusters_df, rank_df)
 
-        # Appariement : combien de main keywords ont trouvé un ranking ?
-        matched = decisions_df["best_position"].notna().sum()
-        unmatched = len(decisions_df) - matched
-
-        c0, c1, c2 = st.columns(3)
-        with c0:
-            st.metric("🔎 Main KW appariés (ranking trouvé)", matched)
+        c1, c2 = st.columns(2)
         with c1:
-            st.metric("✅ Optimize existing page (≤ {})".format(optimize_max_pos), n_opt)
+            st.metric("✅ Optimize existing page (1–20)", n_opt)
         with c2:
-            st.metric("🆕 Create new page (no/ >{})".format(optimize_max_pos), n_create)
-
-        if unmatched > 0:
-            with st.expander("Voir les main keywords **sans** ranking"):
-                st.dataframe(
-                    decisions_df.loc[decisions_df["best_position"].isna(), ["main_keyword"]],
-                    use_container_width=True
-                )
+            st.metric("🆕 Create new page (no/ >20)", n_create)
 
         st.subheader("→ Tableau décisionnel")
         st.dataframe(decisions_df, use_container_width=True, height=560)
