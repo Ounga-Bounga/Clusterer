@@ -52,7 +52,7 @@ def parse_similarity_cell(cell: str):
     for p in parts:
         p = re.sub(r"\s*%\s*$", "%", p.strip())  # normaliser espaces avant %
         # Forme "kw (123): 40%"
-        m = re.match(r"(.+?)(?:\(\s*\d+\\s*\))?\s*:\s*([\d.,]+)\s*%", p)
+        m = re.match(r"(.+?)(?:\(\s*\d+\s*\))?\s*:\s*([\d.,]+)\s*%", p)
         if m:
             kw = m.group(1).strip()
             pct = m.group(2).replace(",", ".").strip()
@@ -427,30 +427,5 @@ if file:
             file_name="seo_cluster_ranking_decisions.csv",
             mime="text/csv",
         )
-
-# ===== Bloc aide mémoire dans l'app =====
-with st.expander("📌 Rappel du format attendu"):
-    st.markdown("""
-### ✅ Résumé
-
-**File 1 (clusters)** : `Keyword | Monthly vol. | KW list and %`  
-**File 2 (ranking)** : `Keyword | URL | Position` *(les noms exacts peuvent varier, l’app reconnaît plusieurs synonymes)*
-
-👉 Les deux fichiers doivent être **propres** (1 ligne = 1 mot-clé), sans **colonnes fusionnées** ni **lignes vides parasites**.
-
----
-
-**Exemple File 1 (clusters)**  
-```csv
-Keyword,Monthly vol.,KW list and %
-néons,5400,deco neon (1600): 20% | neon deco (1600): 20% | néon déco (1600): 20%
-tube à led,4400,neons led (1600): 40% | neon led (1600): 30% | led neon (1600): 10%
-deco neon,1600,neon deco (1600): 70% | decoration neon (140): 70% | néon déco: 50%
-**Exemple File 2 (ranking)
-keyword,rank,url
-neon light,4,https://yellowpop.fr/pages/creer-neon-personnalise
-custom neon,4,https://yellowpop.fr/pages/creer-neon-personnalise
-neon design,9,https://yellowpop.fr/pages/creer-neon-personnalise
-néons,9,https://yellowpop.fr/pages/creer-neon-personnalise
-led neon,9,https://yellowpop.fr/pages/creer-neon-personnalise
-""")
+else:
+    st.info("Dépose d’abord le fichier mots-clés pour générer les clusters, puis ajoute ton fichier de rankings.")
