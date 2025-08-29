@@ -280,7 +280,6 @@ def decide_from_ranking(clusters_df: pd.DataFrame, ranking_norm_df: pd.DataFrame
         best_pos, best_url = None, None
         evidence_list = []
         if matches:
-            # tri par position croissante (1 = meilleur)
             matches_sorted = sorted([m for m in matches if pd.notna(m[0])])
             if matches_sorted:
                 best_pos, best_url = matches_sorted[0]
@@ -303,7 +302,6 @@ def decide_from_ranking(clusters_df: pd.DataFrame, ranking_norm_df: pd.DataFrame
 
     out = pd.DataFrame(rows)
 
-    # compteurs utiles
     n_opt = int((out["decision"] == "Optimize existing page").sum())
     n_create = int((out["decision"].str.startswith("Create new page")).sum())
 
@@ -332,16 +330,12 @@ with left:
     st.caption("Astuce: 30–40% marche bien pour des SERP FR.")
 
 if file:
-    # Lecture & préparation
     df = _read_any(file)
     (
         data, kw_col, vol_col, sim_col,
         file_kw_count_raw, file_total_volume,
         removed_dups, norm_to_canonical
     ) = prepare_base(df)
-
-    with st.expander("Aperçu (10 premières lignes **après dédup**)"):
-        st.dataframe(data.head(10), use_container_width=True)
 
     # Métriques globales (RAW)
     m1, m2, m3 = st.columns(3)
@@ -352,14 +346,12 @@ if file:
     with m3:
         st.metric("Doublons supprimés (sans accents)", value=f"{removed_dups}")
 
-    # Clustering dynamique
     clusters_df = clusterize(data, kw_col, vol_col, sim_col, float(threshold), norm_to_canonical)
 
     with right:
         st.subheader("→ Résultats des clusters")
         st.dataframe(clusters_df, use_container_width=True, height=420)
 
-        # Exports clusters
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as w:
             clusters_df.to_excel(w, index=False, sheet_name="Clusters")
@@ -390,7 +382,6 @@ if file:
 
         decisions_df, n_opt, n_create = decide_from_ranking(clusters_df, rank_df, optimize_max_pos=optimize_max_pos)
 
-        # Appariement : combien de main keywords ont trouvé un ranking ?
         matched = decisions_df["best_position"].notna().sum()
         unmatched = len(decisions_df) - matched
 
@@ -412,7 +403,6 @@ if file:
         st.subheader("→ Tableau décisionnel")
         st.dataframe(decisions_df, use_container_width=True, height=560)
 
-        # Exports decisions
         buf2 = io.BytesIO()
         with pd.ExcelWriter(buf2, engine="openpyxl") as w:
             decisions_df.to_excel(w, index=False, sheet_name="Decisions")
